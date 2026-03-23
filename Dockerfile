@@ -7,7 +7,7 @@ COPY package.json package-lock.json ./
 RUN npm install --production
 
 # 复制必要文件
-COPY index.html server.js ./
+COPY index.html server.js eng.traineddata ./
 
 # 环境变量
 ENV PORT=8080

@@ -4,11 +4,24 @@ const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || '.';
 const DATA_FILE = path.join(DATA_DIR, 'codes.json');
+
+// Supabase 配置
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+let supabase = null;
+
+if (SUPABASE_URL && SUPABASE_KEY) {
+    supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+    console.log('✅ Supabase 客户端初始化完成');
+} else {
+    console.log('⚠️ 未配置 Supabase，使用本地文件存储');
+}
 
 // 静态文件
 app.use(express.static('.'));
@@ -63,25 +76,54 @@ let dataCacheTime = 0;
 const CACHE_TTL = 1000; // 缓存1秒
 
 // 加载数据（返回今天的所有数据，区分已使用和未使用）
-function loadData() {
+async function loadData() {
     const now = Date.now();
     // 使用缓存（1秒内有效）
     if (dataCache && (now - dataCacheTime) < CACHE_TTL) {
         return dataCache;
     }
     
-    if (fs.existsSync(DATA_FILE)) {
-        const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-        const today = getToday();
-        // 只保留今天的数据
-        const todayData = data.filter(item => item.date === today);
+    const today = getToday();
+    
+    if (supabase) {
+        // 从 Supabase 查询今天的数据
+        const { data, error } = await supabase
+            .from('invite_codes')
+            .select('*')
+            .eq('date', today);
+        
+        if (error) {
+            console.error('Supabase 查询错误:', error);
+            return [];
+        }
+        
+        // 转换数据格式
+        const todayData = data.map(item => ({
+            id: item.id,
+            number: item.code,
+            timestamp: new Date(item.created_at).getTime(),
+            date: item.date,
+            used: item.used,
+            usedAt: item.used_at ? new Date(item.used_at).getTime() : undefined
+        }));
+        
         dataCache = todayData;
         dataCacheTime = now;
         return todayData;
+    } else {
+        // 本地文件存储
+        if (fs.existsSync(DATA_FILE)) {
+            const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+            // 只保留今天的数据
+            const todayData = data.filter(item => item.date === today);
+            dataCache = todayData;
+            dataCacheTime = now;
+            return todayData;
+        }
+        dataCache = [];
+        dataCacheTime = now;
+        return [];
     }
-    dataCache = [];
-    dataCacheTime = now;
-    return [];
 }
 
 // 清除缓存（数据变更时调用）
@@ -91,10 +133,40 @@ function invalidateCache() {
 }
 
 // 保存数据
-function saveData(data) {
+async function saveData(data) {
     const today = getToday();
     data = data.filter(item => item.date === today);
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    
+    if (supabase) {
+        // 清除今天的数据，然后重新插入
+        await supabase
+            .from('invite_codes')
+            .delete()
+            .eq('date', today);
+        
+        // 批量插入数据
+        if (data.length > 0) {
+            const insertData = data.map(item => ({
+                code: item.number,
+                date: item.date,
+                used: item.used,
+                used_at: item.usedAt ? new Date(item.usedAt).toISOString() : null,
+                created_at: new Date(item.timestamp).toISOString()
+            }));
+            
+            const { error } = await supabase
+                .from('invite_codes')
+                .insert(insertData);
+            
+            if (error) {
+                console.error('Supabase 插入错误:', error);
+            }
+        }
+    } else {
+        // 本地文件存储
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    }
+    
     // 清除缓存
     invalidateCache();
 }
@@ -105,9 +177,9 @@ app.get('/', (req, res) => {
 });
 
 // 获取列表（返回5个未使用和5个已使用的邀请码）
-app.get('/api', (req, res) => {
+app.get('/api', async (req, res) => {
     if (req.query.action === 'get') {
-        const allCodes = loadData();
+        const allCodes = await loadData();
         const today = getToday();
         
         // 分离未使用和已使用
@@ -129,13 +201,13 @@ app.get('/api', (req, res) => {
 });
 
 // 标记已使用（标记used=true，不删除）
-app.post('/api/mark_used', (req, res) => {
+app.post('/api/mark_used', async (req, res) => {
     const itemNumber = req.body.number;
     const itemId = req.body.id;
     const today = getToday();
     
     // 读取所有数据
-    let allCodes = loadData();
+    let allCodes = await loadData();
     let found = false;
     
     // 查找并标记
@@ -151,7 +223,7 @@ app.post('/api/mark_used', (req, res) => {
     }
     
     if (found) {
-        saveData(allCodes);
+        await saveData(allCodes);
         res.json({ success: true });
     } else {
         res.json({ success: false, message: '未找到该邀请码或已使用' });
@@ -222,7 +294,7 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         // 只有识别到以7、8、9开头的9位数字才保存
         if (codes.length > 0) {
             const code = codes[0];
-            const allCodes = loadData();
+            const allCodes = await loadData();
             const unusedCodes = allCodes.filter(item => !item.used);
             
             // 检查是否已存在
@@ -235,7 +307,7 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
                     date: getToday(),
                     used: false
                 });
-                saveData(allCodes);
+                await saveData(allCodes);
             }
         }
         
