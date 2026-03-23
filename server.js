@@ -2,7 +2,6 @@ const express = require('express');
 const multer = require('multer');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
-const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
@@ -10,7 +9,6 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || '.';
 const DATA_FILE = path.join(DATA_DIR, 'codes.json');
-const DATABASE_URL = process.env.DATABASE_URL;
 
 // 静态文件
 app.use(express.static('.'));
@@ -18,7 +16,6 @@ app.use(express.json());
 
 // 创建 Tesseract Worker 池，复用语言包
 let workerPool = null;
-let dbPool = null;
 
 async function initWorkerPool() {
     console.log('正在初始化 Tesseract Worker 池...');
@@ -52,35 +49,6 @@ async function initWorkerPool() {
     console.log('✅ Tesseract Worker 池初始化完成');
 }
 
-async function initDatabase() {
-    if (!DATABASE_URL) {
-        console.log('未配置 DATABASE_URL，继续使用本地文件存储');
-        return;
-    }
-
-    dbPool = new Pool({
-        connectionString: DATABASE_URL,
-        ssl: {
-            rejectUnauthorized: false
-        }
-    });
-
-    await dbPool.query(`
-        CREATE TABLE IF NOT EXISTS invite_codes (
-            id BIGSERIAL PRIMARY KEY,
-            number VARCHAR(9) NOT NULL,
-            timestamp BIGINT NOT NULL,
-            date VARCHAR(10) NOT NULL,
-            used BOOLEAN NOT NULL DEFAULT FALSE,
-            used_at BIGINT,
-            UNIQUE (date, number)
-        )
-    `);
-
-    await dbPool.query('DELETE FROM invite_codes WHERE date <> $1', [getToday()]);
-    console.log('✅ PostgreSQL 初始化完成');
-}
-
 // 文件上传（使用内存存储，不保存到磁盘）
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -95,28 +63,16 @@ let dataCacheTime = 0;
 const CACHE_TTL = 1000; // 缓存1秒
 
 // 加载数据（返回今天的所有数据，区分已使用和未使用）
-async function loadData() {
+function loadData() {
     const now = Date.now();
     // 使用缓存（1秒内有效）
     if (dataCache && (now - dataCacheTime) < CACHE_TTL) {
         return dataCache;
     }
-
-    const today = getToday();
-
-    if (dbPool) {
-        await dbPool.query('DELETE FROM invite_codes WHERE date <> $1', [today]);
-        const result = await dbPool.query(
-            'SELECT id, number, timestamp, date, used, used_at AS "usedAt" FROM invite_codes WHERE date = $1 ORDER BY timestamp ASC',
-            [today]
-        );
-        dataCache = result.rows;
-        dataCacheTime = now;
-        return result.rows;
-    }
     
     if (fs.existsSync(DATA_FILE)) {
         const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        const today = getToday();
         // 只保留今天的数据
         const todayData = data.filter(item => item.date === today);
         dataCache = todayData;
@@ -151,24 +107,22 @@ app.get('/', (req, res) => {
 // 获取列表（返回5个未使用和5个已使用的邀请码）
 app.get('/api', (req, res) => {
     if (req.query.action === 'get') {
-        loadData().then(allCodes => {
-            // 分离未使用和已使用
-            const unused = allCodes.filter(item => !item.used);
-            const used = allCodes.filter(item => item.used);
-
-            // 未使用：按时间正序（最早提交的在前），取前5个
-            const sortedUnused = unused.sort((a, b) => a.timestamp - b.timestamp);
-            const resultUnused = sortedUnused.slice(0, 5);
-
-            // 已使用：按时间倒序，取最近5个
-            const sortedUsed = used.sort((a, b) => b.timestamp - a.timestamp);
-            const resultUsed = sortedUsed.slice(0, 5);
-
-            res.json({ unused: resultUnused, used: resultUsed });
-        }).catch(err => {
-            console.error('读取数据失败:', err);
-            res.json({ success: false, message: '读取数据失败' });
-        });
+        const allCodes = loadData();
+        const today = getToday();
+        
+        // 分离未使用和已使用
+        const unused = allCodes.filter(item => !item.used);
+        const used = allCodes.filter(item => item.used);
+        
+        // 未使用：按时间正序（最早提交的在前），取前5个
+        const sortedUnused = unused.sort((a, b) => a.timestamp - b.timestamp);
+        const resultUnused = sortedUnused.slice(0, 5);
+        
+        // 已使用：按时间倒序，取最近5个
+        const sortedUsed = used.sort((a, b) => b.timestamp - a.timestamp);
+        const resultUsed = sortedUsed.slice(0, 5);
+        
+        res.json({ unused: resultUnused, used: resultUsed });
     } else {
         res.json({ success: false, message: '未知操作' });
     }
@@ -181,53 +135,27 @@ app.post('/api/mark_used', (req, res) => {
     const today = getToday();
     
     // 读取所有数据
-    loadData().then(async allCodes => {
-        if (dbPool) {
-            const params = [today, Date.now()];
-            let query = 'UPDATE invite_codes SET used = TRUE, used_at = $2 WHERE date = $1 AND used = FALSE';
-
-            if (itemNumber) {
-                params.push(itemNumber);
-                query += ' AND number = $3';
-            } else if (itemId !== undefined) {
-                params.push(itemId);
-                query += ' AND id = $3';
-            }
-
-            const result = await dbPool.query(query, params);
-            invalidateCache();
-
-            if (result.rowCount > 0) {
-                res.json({ success: true });
-            } else {
-                res.json({ success: false, message: '未找到该邀请码或已使用' });
-            }
-            return;
-        }
-
-        let found = false;
-
-        for (let item of allCodes) {
-            if (item.date === today && !item.used) {
-                if ((itemNumber && item.number === itemNumber) || (itemId !== undefined && item.id === itemId)) {
-                    item.used = true;
-                    item.usedAt = Date.now();
-                    found = true;
-                    break;
-                }
+    let allCodes = loadData();
+    let found = false;
+    
+    // 查找并标记
+    for (let item of allCodes) {
+        if (item.date === today && !item.used) {
+            if ((itemNumber && item.number === itemNumber) || (itemId !== undefined && item.id === itemId)) {
+                item.used = true;
+                item.usedAt = Date.now();
+                found = true;
+                break;
             }
         }
-
-        if (found) {
-            saveData(allCodes);
-            res.json({ success: true });
-        } else {
-            res.json({ success: false, message: '未找到该邀请码或已使用' });
-        }
-    }).catch(err => {
-        console.error('标记已使用失败:', err);
-        res.json({ success: false, message: '操作失败' });
-    });
+    }
+    
+    if (found) {
+        saveData(allCodes);
+        res.json({ success: true });
+    } else {
+        res.json({ success: false, message: '未找到该邀请码或已使用' });
+    }
 });
 
 // OCR 识别并自动保存
@@ -253,7 +181,7 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         if (width !== 1200 || height !== 1500) {
             return res.json({
                 success: false,
-                message: '请不要上传无关内容'
+                message: '图片分辨率不符合要求，仅支持 1200x1500 的截图'
             });
         }
         
@@ -294,30 +222,20 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         // 只有识别到以7、8、9开头的9位数字才保存
         if (codes.length > 0) {
             const code = codes[0];
-            const allCodes = await loadData();
+            const allCodes = loadData();
             const unusedCodes = allCodes.filter(item => !item.used);
-
-            if (dbPool) {
-                if (!unusedCodes.some(item => item.number === code)) {
-                    await dbPool.query(
-                        'INSERT INTO invite_codes (number, timestamp, date, used) VALUES ($1, $2, $3, FALSE) ON CONFLICT (date, number) DO NOTHING',
-                        [code, Date.now(), getToday()]
-                    );
-                    invalidateCache();
-                }
-            } else {
-                // 检查是否已存在
-                if (!unusedCodes.some(item => item.number === code)) {
-                    const maxId = allCodes.length > 0 ? Math.max(...allCodes.map(item => item.id || 0)) : 0;
-                    allCodes.push({
-                        id: maxId + 1,
-                        number: code,
-                        timestamp: Date.now(),
-                        date: getToday(),
-                        used: false
-                    });
-                    saveData(allCodes);
-                }
+            
+            // 检查是否已存在
+            if (!unusedCodes.some(item => item.number === code)) {
+                const maxId = allCodes.length > 0 ? Math.max(...allCodes.map(item => item.id || 0)) : 0;
+                allCodes.push({
+                    id: maxId + 1,
+                    number: code,
+                    timestamp: Date.now(),
+                    date: getToday(),
+                    used: false
+                });
+                saveData(allCodes);
             }
         }
         
@@ -336,7 +254,6 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
 
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`服务器运行在端口 ${PORT}`);
-    await initDatabase();
     // 启动时初始化 Worker 池
     await initWorkerPool();
 });
