@@ -181,7 +181,7 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         if (width !== 1200 || height !== 1500) {
             return res.json({
                 success: false,
-                message: '图片分辨率不符合要求，仅支持 1200x1500 的截图'
+                message: '请不要上传无关内容'
             });
         }
         
