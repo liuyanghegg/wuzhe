@@ -1,0 +1,6 @@
+node_modules/
+codes.json
+*.jpg
+*.jpeg
+*.png
+eng.traineddata
