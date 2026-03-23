@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const multer = require('multer');
 const Tesseract = require('tesseract.js');
@@ -10,6 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || '.';
 const DATA_FILE = path.join(DATA_DIR, 'codes.json');
+const APP_TZ = process.env.TZ || 'Asia/Shanghai';
 
 // Supabase 配置
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -67,16 +70,100 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // 获取今天日期
 function getToday() {
-    return new Date().toISOString().split('T')[0];
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
 }
 
 // 数据缓存
 let dataCache = null;
 let dataCacheTime = 0;
 const CACHE_TTL = 1000; // 缓存1秒
+let lastCleanupDate = null;
+let cleanupPromise = null;
+let cleanupTimer = null;
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getMsUntilNextMidnight() {
+    const now = new Date();
+    const nextMidnight = new Date(now);
+    nextMidnight.setHours(24, 0, 0, 0);
+    return nextMidnight.getTime() - now.getTime();
+}
+
+async function cleanupExpiredCodes() {
+    const today = getToday();
+
+    if (supabase) {
+        const { error } = await supabase
+            .from('invite_codes')
+            .delete()
+            .lt('date', today);
+
+        if (error) {
+            throw new Error(`Supabase 清理过期邀请码失败: ${error.message}`);
+        }
+    } else if (fs.existsSync(DATA_FILE)) {
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        const todayData = data.filter(item => item.date === today);
+
+        if (todayData.length !== data.length) {
+            fs.writeFileSync(DATA_FILE, JSON.stringify(todayData, null, 2));
+        }
+    }
+
+    invalidateCache();
+    lastCleanupDate = today;
+}
+
+async function ensureDailyCleanup() {
+    const today = getToday();
+
+    if (lastCleanupDate === today) {
+        return;
+    }
+
+    if (!cleanupPromise) {
+        cleanupPromise = (async () => {
+            await cleanupExpiredCodes();
+            console.log(`🧹 已完成 ${today} 的过期邀请码清理`);
+        })().finally(() => {
+            cleanupPromise = null;
+        });
+    }
+
+    await cleanupPromise;
+}
+
+function scheduleNextCleanup() {
+    if (cleanupTimer) {
+        clearTimeout(cleanupTimer);
+    }
+
+    const delay = getMsUntilNextMidnight();
+    console.log(`⏰ 已安排下次自动清理，时区 ${APP_TZ}，${Math.ceil(delay / 1000)} 秒后执行`);
+
+    cleanupTimer = setTimeout(async () => {
+        try {
+            await cleanupExpiredCodes();
+            console.log('🧹 零点自动清理完成');
+        } catch (error) {
+            console.error('❌ 零点自动清理失败:', error.message || error);
+        } finally {
+            scheduleNextCleanup();
+        }
+    }, delay);
+}
 
 // 加载数据（返回今天的所有数据，区分已使用和未使用）
 async function loadData() {
+    await ensureDailyCleanup();
+
     const now = Date.now();
     // 使用缓存（1秒内有效）
     if (dataCache && (now - dataCacheTime) < CACHE_TTL) {
@@ -132,17 +219,46 @@ function invalidateCache() {
     dataCacheTime = 0;
 }
 
+async function preloadSupabaseCache(maxRetries = 5, retryDelay = 3000) {
+    if (!supabase) {
+        return;
+    }
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            invalidateCache();
+            const data = await loadData();
+            console.log(`✅ 启动预拉取完成，已缓存 ${data.length} 条今日邀请码`);
+            return;
+        } catch (error) {
+            console.error(`❌ 启动预拉取失败（第 ${attempt}/${maxRetries} 次）:`, error.message || error);
+
+            if (attempt < maxRetries) {
+                await sleep(retryDelay);
+            }
+        }
+    }
+
+    console.error('⚠️ 启动预拉取多次失败，后续将继续使用按需拉取');
+}
+
 // 保存数据
 async function saveData(data) {
+    await ensureDailyCleanup();
+
     const today = getToday();
     data = data.filter(item => item.date === today);
     
     if (supabase) {
         // 清除今天的数据，然后重新插入
-        await supabase
+        const { error: deleteError } = await supabase
             .from('invite_codes')
             .delete()
             .eq('date', today);
+
+        if (deleteError) {
+            throw new Error(`Supabase 删除错误: ${deleteError.message}`);
+        }
         
         // 批量插入数据
         if (data.length > 0) {
@@ -159,7 +275,7 @@ async function saveData(data) {
                 .insert(insertData);
             
             if (error) {
-                console.error('Supabase 插入错误:', error);
+                throw new Error(`Supabase 插入错误: ${error.message}`);
             }
         }
     } else {
@@ -169,6 +285,58 @@ async function saveData(data) {
     
     // 清除缓存
     invalidateCache();
+}
+
+async function addCodeRecord(code) {
+    await ensureDailyCleanup();
+
+    const now = Date.now();
+    const record = {
+        number: code,
+        timestamp: now,
+        date: getToday(),
+        used: false
+    };
+
+    if (supabase) {
+        const { data, error } = await supabase
+            .from('invite_codes')
+            .insert({
+                code: record.number,
+                date: record.date,
+                used: false,
+                used_at: null,
+                created_at: new Date(record.timestamp).toISOString()
+            })
+            .select('id, code, date, used, used_at, created_at')
+            .single();
+
+        if (error) {
+            throw new Error(`Supabase 上传同步失败: ${error.message}`);
+        }
+
+        invalidateCache();
+
+        return {
+            id: data.id,
+            number: data.code,
+            timestamp: new Date(data.created_at).getTime(),
+            date: data.date,
+            used: data.used,
+            usedAt: data.used_at ? new Date(data.used_at).getTime() : undefined
+        };
+    }
+
+    const allCodes = await loadData();
+    const maxId = allCodes.length > 0 ? Math.max(...allCodes.map(item => item.id || 0)) : 0;
+    const newRecord = {
+        id: maxId + 1,
+        ...record
+    };
+
+    allCodes.push(newRecord);
+    await saveData(allCodes);
+    return newRecord;
 }
 
 // 首页
@@ -299,15 +467,8 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
             
             // 检查是否已存在
             if (!unusedCodes.some(item => item.number === code)) {
-                const maxId = allCodes.length > 0 ? Math.max(...allCodes.map(item => item.id || 0)) : 0;
-                allCodes.push({
-                    id: maxId + 1,
-                    number: code,
-                    timestamp: Date.now(),
-                    date: getToday(),
-                    used: false
-                });
-                await saveData(allCodes);
+                await addCodeRecord(code);
+                console.log(`✅ OCR 上传后已同步到数据库: ${code}`);
             }
         }
         
@@ -328,4 +489,8 @@ app.listen(PORT, '0.0.0.0', async () => {
     console.log(`服务器运行在端口 ${PORT}`);
     // 启动时初始化 Worker 池
     await initWorkerPool();
+    await ensureDailyCleanup();
+    // 启动完成后预拉取一次当天邀请码到缓存
+    await preloadSupabaseCache();
+    scheduleNextCleanup();
 });

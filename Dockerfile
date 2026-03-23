@@ -12,6 +12,7 @@ COPY index.html server.js eng.traineddata ./
 # 环境变量
 ENV PORT=8080
 ENV NODE_ENV=production
+ENV TZ=Asia/Shanghai
 EXPOSE 8080
 
 # 启动
