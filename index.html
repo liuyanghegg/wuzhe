@@ -227,6 +227,26 @@
         .list-section {
             margin-top: 20px;
         }
+        .stats-bar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        .stat-chip {
+            background: #fff5f7;
+            color: #d81b60;
+            border: 1px solid #ffd1df;
+            border-radius: 999px;
+            padding: 6px 12px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .stat-chip.available {
+            background: #eefaf1;
+            color: #2e7d32;
+            border-color: #cfead4;
+        }
         .list-section h3 {
             color: #333;
             font-size: 14px;
@@ -355,6 +375,10 @@
                     <button onclick="loadList()" style="background:#FF3366;color:#fff;border:none;padding:8px 16px;font-size:14px;border-radius:6px;cursor:pointer;">🔄 刷新</button>
                 </div>
             </div>
+            <div class="stats-bar">
+                <div class="stat-chip available" id="todayAvailableCount">今日可用：0</div>
+                <div class="stat-chip" id="todayUsedCount">今日已使用：0</div>
+            </div>
             <ul id="numberList" class="list"></ul>
         </div>
     </div>
@@ -369,6 +393,11 @@
         const resultCode = document.getElementById('resultCode');
         const jumpLink = document.getElementById('jumpLink');
         const errorMsg = document.getElementById('errorMsg');
+        const todayAvailableCount = document.getElementById('todayAvailableCount');
+        const todayUsedCount = document.getElementById('todayUsedCount');
+        const TARGET_IMAGE_WIDTH = 1200;
+        const TARGET_IMAGE_HEIGHT = 1500;
+        const IMAGE_TOLERANCE = 100;
         
         let currentCode = '';
         
@@ -396,10 +425,55 @@
                 handleFile({ target: { files } });
             }
         });
+
+        function isAllowedImageSize(width, height) {
+            return Math.abs(width - TARGET_IMAGE_WIDTH) <= IMAGE_TOLERANCE
+                && Math.abs(height - TARGET_IMAGE_HEIGHT) <= IMAGE_TOLERANCE;
+        }
+
+        function readImageSize(file) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                const objectUrl = URL.createObjectURL(file);
+
+                img.onload = () => {
+                    const size = {
+                        width: img.naturalWidth,
+                        height: img.naturalHeight
+                    };
+                    URL.revokeObjectURL(objectUrl);
+                    resolve(size);
+                };
+
+                img.onerror = () => {
+                    URL.revokeObjectURL(objectUrl);
+                    reject(new Error('无法读取图片尺寸'));
+                };
+
+                img.src = objectUrl;
+            });
+        }
         
-        function handleFile(e) {
+        async function handleFile(e) {
             const file = e.target.files[0];
             if (!file) return;
+
+            errorMsg.classList.remove('show');
+
+            try {
+                const { width, height } = await readImageSize(file);
+
+                if (!isAllowedImageSize(width, height)) {
+                    showError('图片尺寸不符合要求，请上传接近 1200x1500 的截图');
+                    fileInput.value = '';
+                    return;
+                }
+            } catch (err) {
+                console.error('图片校验失败:', err);
+                showError('图片读取失败，请重新选择');
+                fileInput.value = '';
+                return;
+            }
 
             // 显示预览
             const reader = new FileReader();
@@ -468,6 +542,11 @@
                 const data = await res.json();
                 const list = document.getElementById('numberList');
                 list.innerHTML = '';
+                const unusedCount = data.counts ? data.counts.unused : (data.unused ? data.unused.length : 0);
+                const usedCount = data.counts ? data.counts.used : (data.used ? data.used.length : 0);
+
+                todayAvailableCount.textContent = `今日可用：${unusedCount}`;
+                todayUsedCount.textContent = `今日已使用：${usedCount}`;
                 
                 // 显示未使用的邀请码
                 if (data.unused && data.unused.length > 0) {

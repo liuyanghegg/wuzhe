@@ -13,6 +13,9 @@ const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || '.';
 const DATA_FILE = path.join(DATA_DIR, 'codes.json');
 const APP_TZ = process.env.TZ || 'Asia/Shanghai';
+const TARGET_IMAGE_WIDTH = 1200;
+const TARGET_IMAGE_HEIGHT = 1500;
+const IMAGE_TOLERANCE = 100;
 
 // Supabase 配置
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -94,6 +97,11 @@ function getMsUntilNextMidnight() {
     const nextMidnight = new Date(now);
     nextMidnight.setHours(24, 0, 0, 0);
     return nextMidnight.getTime() - now.getTime();
+}
+
+function isAllowedImageSize(width, height) {
+    return Math.abs(width - TARGET_IMAGE_WIDTH) <= IMAGE_TOLERANCE
+        && Math.abs(height - TARGET_IMAGE_HEIGHT) <= IMAGE_TOLERANCE;
 }
 
 async function cleanupExpiredCodes() {
@@ -353,6 +361,11 @@ app.get('/api', async (req, res) => {
         // 分离未使用和已使用
         const unused = allCodes.filter(item => !item.used);
         const used = allCodes.filter(item => item.used);
+        const counts = {
+            unused: unused.length,
+            used: used.length,
+            total: allCodes.length
+        };
         
         // 未使用：按时间正序（最早提交的在前），取前5个
         const sortedUnused = unused.sort((a, b) => a.timestamp - b.timestamp);
@@ -362,7 +375,7 @@ app.get('/api', async (req, res) => {
         const sortedUsed = used.sort((a, b) => b.timestamp - a.timestamp);
         const resultUsed = sortedUsed.slice(0, 5);
         
-        res.json({ unused: resultUnused, used: resultUsed });
+        res.json({ unused: resultUnused, used: resultUsed, counts });
     } else {
         res.json({ success: false, message: '未知操作' });
     }
@@ -417,11 +430,11 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         const metadata = await image.metadata();
         const { width, height } = metadata;
 
-        // 只处理目标截图分辨率，避免误识别其它类型图片
-        if (width !== 1200 || height !== 1500) {
+        // 放宽目标截图分辨率范围，减少因轻微裁剪或缩放导致的误判
+        if (!isAllowedImageSize(width, height)) {
             return res.json({
                 success: false,
-                message: '请不要上传无关内容'
+                message: '图片尺寸不符合要求，请上传接近 1200x1500 的截图'
             });
         }
         
