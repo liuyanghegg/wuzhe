@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>PDD 邀请码识别</title>
+    <style>
+        :root {
+            --primary: #FF3366;
+            --primary-bg: #FFF0F4;
+            --primary-border: #FFD1DF;
+            --green: #34C759;
+            --green-bg: #EDFAF1;
+            --green-border: #B4E4C2;
+            --red: #FF3B30;
+            --red-bg: #FFF0F0;
+            --red-border: #FFD4D4;
+            --blue: #007AFF;
+            --blue-bg: #F0F5FF;
+            --blue-border: #C0DCFF;
+            --gray-50: #FAFAFA;
+            --gray-100: #F5F5F7;
+            --gray-200: #E8E8ED;
+            --gray-300: #D1D1D6;
+            --gray-400: #AEAFB6;
+            --gray-500: #8E8E93;
+            --gray-600: #636366;
+            --gray-700: #3A3A3C;
+            --gray-800: #2C2C2E;
+            --r-xs: 8px;
+            --r-sm: 12px;
+            --r-md: 16px;
+            --r-lg: 22px;
+            --r-xl: 28px;
+            --shadow: 0 2px 12px rgba(0,0,0,0.08);
+            --shadow-lg: 0 8px 32px rgba(0,0,0,0.12);
+            --ease: cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif;
+            background: #F7F7F7;
+            min-height: 100vh;
+            min-height: 100dvh;
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            padding: 0 12px;
+            padding: env(safe-area-inset-top) 12px env(safe-area-inset-bottom);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .wrap {
+            width: 100%;
+            max-width: 440px;
+        }
+
+        /* ===== 卡片通用 ===== */
+        .card {
+            background: #fff;
+            border-radius: var(--r-xl);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        /* ===== 上传卡片 ===== */
+        .upload-card {
+            margin-bottom: 12px;
+            border-radius: var(--r-lg);
+        }
+        .upload-inner {
+            padding: 16px;
+        }
+        .upload-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--gray-800);
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .upload-title svg { width: 16px; height: 16px; color: var(--primary); }
+        .upload-area {
+            border: 1.5px dashed var(--primary-border);
+            border-radius: var(--r-sm);
+            padding: 14px 16px;
+            cursor: pointer;
+            background: var(--primary-bg);
+            transition: border-color 0.2s var(--ease), background 0.2s var(--ease);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .upload-area:hover, .upload-area:active {
+            border-color: var(--primary);
+            background: #FFE4EE;
+        }
+        .upload-area.dragover {
+            border-color: var(--primary);
+            background: #FFE4EE;
+        }
+        .upload-icon {
+            width: 38px; height: 38px;
+            flex-shrink: 0;
+            background: var(--primary);
+            border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .upload-icon svg { width: 20px; height: 20px; stroke: #fff; }
+        .upload-info { flex: 1; min-width: 0; }
+        .upload-main {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--gray-700);
+        }
+        .upload-sub {
+            font-size: 11px;
+            color: var(--gray-400);
+            margin-top: 1px;
+        }
+        .upload-arrow { color: var(--gray-300); flex-shrink: 0; }
+        .upload-arrow svg { width: 16px; height: 16px; }
+        #fileInput { display: none; }
+
+        /* ===== 预览 ===== */
+        .preview-area { display: none; margin-bottom: 10px; border-radius: var(--r-sm); overflow: hidden; }
+        .preview-area.show { display: block; }
+        .preview-img { width: 100%; display: block; }
+
+        /* ===== 加载 ===== */
+        .loading {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 18px;
+            color: var(--gray-500);
+            font-size: 13px;
+        }
+        .loading.show { display: flex; }
+        .spin {
+            width: 18px; height: 18px;
+            border: 2px solid var(--primary-border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ===== 识别结果卡片 ===== */
+        .result-card {
+            display: none;
+            margin-bottom: 12px;
+            border-radius: var(--r-lg);
+            background: linear-gradient(135deg, var(--primary) 0%, #FF6B8A 100%);
+            padding: 18px 20px 20px;
+            position: relative;
+            overflow: hidden;
+        }
+        .result-card.show { display: block; }
+        .result-card::before {
+            content: '';
+            position: absolute;
+            top: -40px; right: -40px;
+            width: 140px; height: 140px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.1);
+        }
+        .result-label {
+            font-size: 10px;
+            color: rgba(255,255,255,0.65);
+            font-weight: 500;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        .result-code {
+            color: #fff;
+            font-size: 30px;
+            font-weight: 800;
+            letter-spacing: 7px;
+            font-variant-numeric: tabular-nums;
+            line-height: 1;
+            margin-bottom: 16px;
+        }
+        .jump-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #fff;
+            color: var(--primary) !important;
+            padding: 10px 22px;
+            border-radius: 50px;
+            font-size: 13px;
+            font-weight: 600;
+            text-decoration: none;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+            transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease);
+        }
+        .jump-btn:active { transform: scale(0.96); box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+        .jump-btn svg { width: 14px; height: 14px; }
+
+        /* ===== 错误 ===== */
+        .error-msg {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            background: var(--red-bg);
+            border: 1px solid var(--red-border);
+            border-radius: var(--r-xs);
+            color: var(--red);
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+        .error-msg.show { display: flex; }
+        .error-msg svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+        /* ===== 列表卡片 ===== */
+        .list-card {
+            border-radius: var(--r-lg);
+        }
+        .list-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 16px 12px;
+            border-bottom: 1px solid var(--gray-200);
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .list-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--gray-800);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .list-title svg { width: 15px; height: 15px; }
+        .list-actions { display: flex; gap: 5px; }
+
+        /* 按钮 */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 500;
+            border: none;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.15s var(--ease);
+            white-space: nowrap;
+        }
+        .btn svg { width: 11px; height: 11px; }
+        .btn:active { transform: scale(0.96); }
+        .btn-blue { background: var(--blue-bg); color: var(--blue); }
+        .btn-green { background: var(--green-bg); color: var(--green); }
+        .btn-gray { background: var(--gray-100); color: var(--gray-600); }
+        .btn-primary { background: var(--primary); color: #fff; }
+
+        /* 统计 */
+        .stats {
+            display: flex;
+            gap: 6px;
+            padding: 12px 16px 0;
+            flex-wrap: wrap;
+        }
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border-radius: 50px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .stat svg { width: 11px; height: 11px; }
+        .stat.green { background: var(--green-bg); color: var(--green); }
+        .stat.gray { background: var(--gray-100); color: var(--gray-500); }
+
+        /* 列表内容 */
+        .list-body { padding: 12px 16px 16px; }
+
+        /* 组标签 */
+        .group-label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 0 7px;
+            color: var(--gray-500);
+        }
+        .group-label.green { color: var(--green); }
+        .group-label.red { color: var(--red); }
+        .group-label svg { width: 12px; height: 12px; }
+
+        /* 码条目 */
+        .code-list { list-style: none; }
+        .code-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border-radius: var(--r-xs);
+            margin-bottom: 5px;
+            gap: 10px;
+        }
+        .code-item.unused { background: var(--green-bg); border: 1px solid var(--green-border); }
+        .code-item.used { background: var(--gray-50); border: 1px solid var(--gray-200); opacity: 0.65; }
+        .code-item-info { flex: 1; min-width: 0; }
+        .code-item-num {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--gray-800);
+            letter-spacing: 2px;
+            font-variant-numeric: tabular-nums;
+        }
+        .code-item-time { font-size: 10px; color: var(--gray-400); margin-top: 1px; }
+        .code-item-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+        .btn-jump {
+            background: var(--green);
+            color: #fff !important;
+            padding: 5px 9px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            transition: all 0.15s var(--ease);
+        }
+        .btn-jump svg { width: 10px; height: 10px; }
+        .btn-jump:active { transform: scale(0.95); opacity: 0.85; }
+        .btn-used {
+            background: var(--primary);
+            color: #fff;
+            border: none;
+            padding: 5px 9px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s var(--ease);
+        }
+        .btn-used:active { transform: scale(0.95); }
+        .used-tag {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            color: var(--red);
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .used-tag svg { width: 12px; height: 12px; }
+
+        /* 空状态 */
+        .empty {
+            text-align: center;
+            padding: 32px 20px;
+            color: var(--gray-400);
+        }
+        .empty svg { width: 40px; height: 40px; margin-bottom: 8px; opacity: 0.35; }
+        .empty p { font-size: 12px; line-height: 1.6; }
+
+        /* 响应式 */
+        @media (max-width: 390px) {
+            .result-code { font-size: 24px; letter-spacing: 5px; }
+            .list-head { flex-direction: column; align-items: flex-start; }
+            .code-item { flex-wrap: wrap; }
+            .code-item-actions { width: 100%; justify-content: flex-end; margin-top: 2px; }
+        }
+
+        /* 安全区域 */
+        @supports (padding-bottom: env(safe-area-inset-bottom)) {
+            .wrap { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+        }
+
+        /* 暗色模式 */
+        @media (prefers-color-scheme: dark) {
+            body { background: #000; }
+            .card { background: #1C1C1E; }
+            .upload-inner { background: #1C1C1E; }
+            .upload-title { color: #E5E5EA; }
+            .upload-area { background: #2C2C2E; border-color: #3A3A3C; }
+            .upload-area:hover { background: #3A2A32; border-color: var(--primary); }
+            .upload-main { color: #E5E5EA; }
+            .upload-sub { color: #636366; }
+            .upload-arrow { color: #3A3A3C; }
+            .result-card { background: linear-gradient(135deg, #E62958, #FF3366); }
+            .error-msg { background: #2A1A1A; border-color: #3A1A1A; color: #FF453A; }
+            .list-head { border-color: #3A3A3C; }
+            .list-title { color: #E5E5EA; }
+            .btn-gray { background: #2C2C2E; color: #AEAEB2; }
+            .btn-blue { background: #1A2540; color: #0A84FF; }
+            .btn-green { background: #1A2E1E; color: #30D158; }
+            .stat.green { background: #1A2E1E; color: #34C759; }
+            .stat.gray { background: #2C2C2E; color: #8E8E93; }
+            .code-item.unused { background: #1A2E1E; border-color: #2E3A28; }
+            .code-item.used { background: #2C2C2E; border-color: #3A3A3C; }
+            .code-item-num { color: #E5E5EA; }
+            .group-label { color: #8E8E93; }
+            .group-label.green { color: #34C759; }
+            .group-label.red { color: #FF453A; }
+        }
+    </style>
+</head>
+<body>
+<div class="wrap">
+
+    <!-- 上传卡片 -->
+    <div class="card upload-card">
+        <div class="upload-inner">
+            <div class="upload-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                    <circle cx="12" cy="13" r="4"/>
+                </svg>
+                截图识别
+            </div>
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="2"/>
+                        <circle cx="8.5" cy="8.5" r="1.5"/>
+                        <polyline points="21 15 16 10 5 21"/>
+                    </svg>
+                </div>
+                <div class="upload-info">
+                    <div class="upload-main">上传福袋邀请码图片</div>
+                    <div class="upload-main">只支持保存图片，不支持拍照</div>
+                    <div class="upload-main">如果无法识别请重新保存一张再试试</div>
+                </div>
+                <div class="upload-arrow">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="9 18 15 12 9 6"/>
+                    </svg>
+                </div>
+                <input type="file" id="fileInput" accept="image/*">
+            </div>
+        </div>
+    </div>
+
+    <!-- 预览 -->
+    <div class="preview-area" id="previewArea">
+        <img id="previewImg" class="preview-img" alt="预览">
+    </div>
+
+    <!-- 加载 -->
+    <div class="loading" id="loading">
+        <div class="spin"></div>
+        <span>正在识别中...</span>
+    </div>
+
+    <!-- 识别结果 -->
+    <div class="result-card" id="resultCard">
+        <div class="result-label">当前选中</div>
+        <div class="result-code" id="resultCode">--- ------</div>
+        <a id="jumpLink" class="jump-btn" href="#" target="_blank">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="7" y1="17" x2="17" y2="7"/>
+                <polyline points="7 7 17 7 17 17"/>
+            </svg>
+            跳转拼多多
+        </a>
+    </div>
+
+    <!-- 错误 -->
+    <div class="error-msg" id="errorMsg">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <span id="errorText"></span>
+    </div>
+
+    <!-- 列表卡片 -->
+    <div class="card list-card">
+        <div class="list-head">
+            <div class="list-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="8" y1="6" x2="21" y2="6"/>
+                    <line x1="8" y1="12" x2="21" y2="12"/>
+                    <line x1="8" y1="18" x2="21" y2="18"/>
+                    <line x1="3" y1="6" x2="3.01" y2="6"/>
+                    <line x1="3" y1="12" x2="3.01" y2="12"/>
+                    <line x1="3" y1="18" x2="3.01" y2="18"/>
+                </svg>
+                邀请码记录
+            </div>
+            <div class="list-actions">
+                <a class="btn btn-blue" href="https://www.bilibili.com/video/BV15SPnz5EFJ" target="_blank">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/>
+                        <polygon points="10 8 16 12 10 16 10 8" fill="currentColor" stroke="none"/>
+                    </svg>
+                    教程
+                </a>
+                <a class="btn btn-green" href="https://qm.qq.com/q/noVKlOTDl6" target="_blank">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    入群
+                </a>
+                <button class="btn btn-gray" id="refreshBtn" onclick="loadList()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="23 4 23 10 17 10"/>
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                    </svg>
+                    刷新
+                </button>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat green" id="todayAvailableCount">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                </svg>
+                今日可用 <span id="unusedNum">0</span>
+            </div>
+            <div class="stat gray" id="todayUsedCount">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <polyline points="12 6 12 12 16 14"/>
+                </svg>
+                已使用 <span id="usedNum">0</span>
+            </div>
+        </div>
+
+        <div class="list-body">
+            <div id="numberList"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const uploadArea = document.getElementById('uploadArea');
+    const fileInput = document.getElementById('fileInput');
+    const previewArea = document.getElementById('previewArea');
+    const previewImg = document.getElementById('previewImg');
+    const loading = document.getElementById('loading');
+    const resultCard = document.getElementById('resultCard');
+    const resultCode = document.getElementById('resultCode');
+    const jumpLink = document.getElementById('jumpLink');
+    const errorMsg = document.getElementById('errorMsg');
+    const errorText = document.getElementById('errorText');
+    const unusedNum = document.getElementById('unusedNum');
+    const usedNum = document.getElementById('usedNum');
+    const TARGET_W = 1200, TARGET_H = 1500, TOL = 100;
+
+    const I = {
+        check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
+        x: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
+        arrow: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>`,
+        empty: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
+    };
+
+    uploadArea.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', handleFile);
+    uploadArea.addEventListener('dragover', e => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+    uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+    uploadArea.addEventListener('drop', e => {
+        e.preventDefault();
+        uploadArea.classList.remove('dragover');
+        if (e.dataTransfer.files[0]) handleFile({ target: { files: e.dataTransfer.files } });
+    });
+
+    function readImageSize(file) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            const url = URL.createObjectURL(file);
+            img.onload = () => { URL.revokeObjectURL(url); resolve({ width: img.naturalWidth, height: img.naturalHeight }); };
+            img.onerror = () => { URL.revokeObjectURL(url); reject(); };
+            img.src = url;
+        });
+    }
+
+    async function handleFile(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        errorMsg.classList.remove('show');
+        try {
+            const { width, height } = await readImageSize(file);
+            if (Math.abs(width - TARGET_W) > TOL || Math.abs(height - TARGET_H) > TOL) {
+                showError('图片尺寸不符合要求，请上传接近 1200 × 1500 的截图');
+                fileInput.value = '';
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = ev => { previewImg.src = ev.target.result; previewArea.classList.add('show'); };
+            reader.readAsDataURL(file);
+            uploadAndRecognize(file);
+        } catch {
+            showError('图片读取失败，请重新选择');
+            fileInput.value = '';
+        }
+    }
+
+    async function uploadAndRecognize(file) {
+        loading.classList.add('show');
+        resultCard.classList.remove('show');
+        try {
+            const fd = new FormData();
+            fd.append('image', file);
+            const res = await fetch('/api/ocr', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) { showError(data.message || '识别失败'); return; }
+            const codes = data.codes || [];
+            if (codes.length > 0) {
+                resultCode.textContent = codes[0];
+                jumpLink.href = `pinduoduo://com.xunmeng.pinduoduo/search_result.html?search_key=${codes[0]}`;
+                resultCard.classList.add('show');
+                loadList();
+            } else {
+                showError('未识别到有效的9位邀请码');
+            }
+        } catch {
+            showError('识别失败，请检查网络');
+        } finally {
+            loading.classList.remove('show');
+        }
+    }
+
+    function showError(msg) {
+        errorText.textContent = msg;
+        errorMsg.classList.add('show');
+    }
+
+    async function loadList() {
+        const btn = document.getElementById('refreshBtn');
+        if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+        try {
+            const res = await fetch('/api?action=get');
+            const data = await res.json();
+            const list = document.getElementById('numberList');
+            list.innerHTML = '';
+            const uc = data.counts ? data.counts.unused : (data.unused ? data.unused.length : 0);
+            const rc = data.counts ? data.counts.used : (data.used ? data.used.length : 0);
+            unusedNum.textContent = uc;
+            usedNum.textContent = rc;
+
+            if ((!data.unused || data.unused.length === 0) && (!data.used || data.used.length === 0)) {
+                list.innerHTML = `<div class="empty">${I.empty}<p>暂无邀请码记录<br><span style="color:#AEAFB6">上传截图即可开始识别</span></p></div>`;
+                return;
+            }
+
+            if (data.unused && data.unused.length > 0) {
+                const lbl = document.createElement('div');
+                lbl.className = 'group-label green';
+                lbl.innerHTML = I.check + ' 可用邀请码';
+                list.appendChild(lbl);
+                const ul = document.createElement('ul');
+                ul.className = 'code-list';
+                data.unused.forEach(item => ul.appendChild(makeItem(item, false)));
+                list.appendChild(ul);
+            }
+
+            if (data.used && data.used.length > 0) {
+                const lbl = document.createElement('div');
+                lbl.className = 'group-label red';
+                lbl.innerHTML = I.x + ' 已使用';
+                list.appendChild(lbl);
+                const ul = document.createElement('ul');
+                ul.className = 'code-list';
+                data.used.forEach(item => ul.appendChild(makeItem(item, true)));
+                list.appendChild(ul);
+            }
+        } catch {
+            document.getElementById('numberList').innerHTML = `<div class="empty">${I.empty}<p>加载失败</p></div>`;
+        } finally {
+            if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+        }
+    }
+
+    function makeItem(item, used) {
+        const li = document.createElement('li');
+        li.className = 'code-item ' + (used ? 'used' : 'unused');
+        const ts = item.timestamp > 9999999999 ? item.timestamp : item.timestamp * 1000;
+        const t = new Date(ts);
+        const timeStr = `${t.getMonth()+1}/${t.getDate()} ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
+        const num = item.number;
+        const shown = used ? num : num.slice(0,3) + ' ** ' + num.slice(5);
+        let actions;
+        if (used) {
+            actions = `<div class="used-tag">${I.x} 已使用</div>`;
+        } else {
+            const url = `pinduoduo://com.xunmeng.pinduoduo/search_result.html?search_key=${num}`;
+            actions = `<a class="btn-jump" href="${url}">${I.arrow}跳转</a><button class="btn-used" onclick="markUsed('${num}')">已用</button>`;
+        }
+        li.innerHTML = `<div class="code-item-info"><div class="code-item-num">${shown}</div><div class="code-item-time">${timeStr}</div></div><div class="code-item-actions">${actions}</div>`;
+        return li;
+    }
+
+    async function markUsed(number) {
+        try {
+            await fetch('/api/mark_used', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ number }) });
+            loadList();
+        } catch {}
+    }
+
+    window.addEventListener('load', () => loadList());
+</script>
+</body>
+</html>

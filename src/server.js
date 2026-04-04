@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: __dirname + '/../config/.env' });
 
 const express = require('express');
 const multer = require('multer');
@@ -367,11 +367,13 @@ app.get('/api', async (req, res) => {
             total: allCodes.length
         };
         
-        // 未使用：按时间正序（最早提交的在前），取前5个
-        const sortedUnused = unused.sort((a, b) => a.timestamp - b.timestamp);
-        const resultUnused = sortedUnused.slice(0, 5);
-        
-        // 已使用：按时间倒序，取最近5个
+        // 未使用：取最新的2条 + 最旧的3条
+        const sortedByTime = unused.sort((a, b) => b.timestamp - a.timestamp);
+        const newest = sortedByTime.slice(0, 2);
+        const oldest = sortedByTime.slice(-3);
+        const resultUnused = [...newest, ...oldest];
+
+        // 已使用：按时间倒序，取前5个
         const sortedUsed = used.sort((a, b) => b.timestamp - a.timestamp);
         const resultUsed = sortedUsed.slice(0, 5);
         
