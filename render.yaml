@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: invite-code-helper
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+      - key: TZ
+        value: Asia/Shanghai

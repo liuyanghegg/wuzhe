@@ -367,14 +367,21 @@ app.get('/api', async (req, res) => {
             total: allCodes.length
         };
         
-        // 未使用：取最新的2条 + 最旧的3条
-        const sortedByTime = unused.sort((a, b) => b.timestamp - a.timestamp);
+        // 未使用：取最新的2条 + 最旧的3条（避免重复）
+        const sortedByTime = [...unused].sort((a, b) => b.timestamp - a.timestamp);
         const newest = sortedByTime.slice(0, 2);
-        const oldest = sortedByTime.slice(-3);
+        // 从剩余的（排除最新的2条）取最后3条
+        const remaining = sortedByTime.slice(2);
+        const oldest = remaining.slice(-3);
         const resultUnused = [...newest, ...oldest];
 
-        // 已使用：按时间倒序，取前5个
-        const sortedUsed = used.sort((a, b) => b.timestamp - a.timestamp);
+        // 已使用：按使用时间倒序，取最近的5个
+        const sortedUsed = [...used].sort((a, b) => {
+            // usedAt 可能为空，空值排到后面
+            const timeA = a.usedAt || 0;
+            const timeB = b.usedAt || 0;
+            return timeB - timeA;
+        });
         const resultUsed = sortedUsed.slice(0, 5);
         
         res.json({ unused: resultUnused, used: resultUsed, counts });
@@ -477,13 +484,55 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         // 只有识别到以7、8、9开头的9位数字才保存
         if (codes.length > 0) {
             const code = codes[0];
-            const allCodes = await loadData();
-            const unusedCodes = allCodes.filter(item => !item.used);
+            const today = getToday();
             
-            // 检查是否已存在
-            if (!unusedCodes.some(item => item.number === code)) {
-                await addCodeRecord(code);
-                console.log(`✅ OCR 上传后已同步到数据库: ${code}`);
+            if (supabase) {
+                // 检查是否已存在
+                const { data: existing } = await supabase
+                    .from('invite_codes')
+                    .select('*')
+                    .eq('date', today)
+                    .eq('code', code)
+                    .single();
+                
+                if (existing) {
+                    // 如果已存在且已使用，重置为未使用
+                    if (existing.used) {
+                        const { error } = await supabase
+                            .from('invite_codes')
+                            .update({ used: false, used_at: null })
+                            .eq('id', existing.id);
+                        
+                        if (!error) {
+                            console.log(`✅ OCR 检测到重复已使用邀请码，已重置为未使用: ${code}`);
+                            invalidateCache();
+                        }
+                    } else {
+                        console.log(`ℹ️ OCR 检测到重复未使用邀请码，跳过: ${code}`);
+                    }
+                } else {
+                    // 不存在，新增记录
+                    await addCodeRecord(code);
+                    console.log(`✅ OCR 上传后已同步到数据库: ${code}`);
+                }
+            } else {
+                // 本地文件存储模式
+                const allCodes = await loadData();
+                const existing = allCodes.find(item => item.number === code);
+                
+                if (existing) {
+                    if (existing.used) {
+                        existing.used = false;
+                        existing.usedAt = undefined;
+                        await saveData(allCodes);
+                        console.log(`✅ OCR 检测到重复已使用邀请码，已重置为未使用: ${code}`);
+                    } else {
+                        console.log(`ℹ️ OCR 检测到重复未使用邀请码，跳过: ${code}`);
+                    }
+                } else {
+                    await addCodeRecord(code);
+                    console.log(`✅ OCR 上传后已同步到数据库: ${code}`);
+                }
             }
         }
         
