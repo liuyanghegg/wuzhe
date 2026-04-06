@@ -181,19 +181,39 @@ async function loadData() {
     const today = getToday();
     
     if (supabase) {
-        // 从 Supabase 查询今天的数据
-        const { data, error } = await supabase
-            .from('invite_codes')
-            .select('*')
-            .eq('date', today);
+        // 使用分页查询获取所有数据（绕过 Supabase 默认 1000 条限制）
+        const allData = [];
+        let page = 0;
+        const pageSize = 1000;
         
-        if (error) {
-            console.error('Supabase 查询错误:', error);
-            return [];
+        while (true) {
+            const { data, error } = await supabase
+                .from('invite_codes')
+                .select('*')
+                .eq('date', today)
+                .range(page * pageSize, (page + 1) * pageSize - 1);
+            
+            if (error) {
+                console.error('Supabase 查询错误:', error);
+                return [];
+            }
+            
+            if (!data || data.length === 0) {
+                break;
+            }
+            
+            allData.push(...data);
+            
+            // 如果返回数据少于页大小，说明已经获取完所有数据
+            if (data.length < pageSize) {
+                break;
+            }
+            
+            page++;
         }
         
         // 转换数据格式
-        const todayData = data.map(item => ({
+        const todayData = allData.map(item => ({
             id: item.id,
             number: item.code,
             timestamp: new Date(item.created_at).getTime(),
@@ -204,6 +224,7 @@ async function loadData() {
         
         dataCache = todayData;
         dataCacheTime = now;
+        console.log(`📊 已加载 ${todayData.length} 条今日邀请码`);
         return todayData;
     } else {
         // 本地文件存储
