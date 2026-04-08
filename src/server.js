@@ -475,8 +475,9 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         }
 
         // 优化：只识别头部50%检测"福袋"（更快）
-        const headBuffer = await image
-            .extract({ left: 0, top: 0, width: width, height: Math.floor(height * 0.5) })
+        const headHeight = Math.floor(height * 0.5);
+        const headBuffer = await sharp(req.file.buffer)
+            .extract({ left: 0, top: 0, width: width, height: headHeight })
             .resize(800)
             .grayscale()
             .toBuffer();
@@ -490,10 +491,10 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
 
         // 裁剪图片底部 35% 区域识别邀请码
         const cropTop = Math.floor(height * 0.65);
-        const cropHeight = Math.floor(height * 0.35);
+        const cropHeight = Math.min(Math.floor(height * 0.35), height - cropTop);
         
         // 裁剪并处理图片
-        const rawCropBuffer = await image
+        const rawCropBuffer = await sharp(req.file.buffer)
             .extract({ left: 0, top: cropTop, width: width, height: cropHeight })
             .resize(800, null, { withoutEnlargement: true })
             .toBuffer();
