@@ -35,9 +35,10 @@ app.use(express.json());
 
 // 创建 Tesseract Worker 池，复用语言包
 let workerPool = null;
+let chineseWorkerPool = null;
 
 async function initWorkerPool() {
-    console.log('正在初始化 Tesseract Worker 池...');
+    console.log('正在初始化 Tesseract Worker 池(英文)...');
     workerPool = await Tesseract.createWorker('eng', 1, {
         logger: m => {
             if (m.status === 'loading tesseract core') {
@@ -64,6 +65,12 @@ async function initWorkerPool() {
         tessedit_do_invert: '0',
         user_words_dawg: '',
         user_patterns_dawg: ''
+    });
+    console.log('正在初始化 Tesseract Worker 池(中文)...');
+    chineseWorkerPool = await Tesseract.createWorker('chi_sim+eng', 1, {
+        logger: m => console.log(m.status, m.progress),
+        tessedit_char_whitelist: '0123456789\u4e00-\u9fa5',
+        tessedit_pageseg_mode: Tesseract.PSM.AUTO
     });
     console.log('✅ Tesseract Worker 池初始化完成');
 }
@@ -451,24 +458,37 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         }
         
         // 等待 Worker 池初始化完成
-        if (!workerPool) {
+        if (!workerPool || !chineseWorkerPool) {
             return res.json({ success: false, message: '系统正在初始化，请稍后再试' });
         }
-        
-        // 使用 sharp 处理图片：裁剪底部 35% 区域
+
+        // 获取图片尺寸
         const image = sharp(req.file.buffer);
         const metadata = await image.metadata();
         const { width, height } = metadata;
 
-        // 放宽目标截图分辨率范围，减少因轻微裁剪或缩放导致的误判
         if (!isAllowedImageSize(width, height)) {
             return res.json({
                 success: false,
                 message: '图片尺寸不符合要求，请上传接近 1200x1500 的截图'
             });
         }
-        
-        // 裁剪图片底部 35% 区域
+
+        // 优化：只识别头部50%检测"福袋"（更快）
+        const headBuffer = await image
+            .extract({ left: 0, top: 0, width: width, height: Math.floor(height * 0.5) })
+            .resize(800)
+            .grayscale()
+            .toBuffer();
+        const headResult = await chineseWorkerPool.recognize(headBuffer);
+        const headText = headResult.data.text.replace(/\s/g, '');
+
+        if (!headText.includes('福袋')) {
+            console.log('❌ OCR 拒绝: 图片不包含"福袋"关键词');
+            return res.json({ success: false, message: '请上传正确的拼多多邀请码助力图片' });
+        }
+
+        // 裁剪图片底部 35% 区域识别邀请码
         const cropTop = Math.floor(height * 0.65);
         const cropHeight = Math.floor(height * 0.35);
         

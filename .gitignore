@@ -1,3 +1,10 @@
 node_modules/
 .env
 codes.json
+*.jpg
+*.png
+*.jpeg
+*.gif
+upload.js
+ocr_only.js
+ocr_chinese.js
