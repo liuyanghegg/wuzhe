@@ -1,0 +1,9 @@
+.git
+node_modules
+logs
+data
+docs
+*.log
+*.zip
+config/.env
+.env

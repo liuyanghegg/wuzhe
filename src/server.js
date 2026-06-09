@@ -18,6 +18,10 @@ const APP_TZ = process.env.TZ || 'Asia/Shanghai';
 const TARGET_IMAGE_WIDTH = 1200;
 const TARGET_IMAGE_HEIGHT = 1500;
 const IMAGE_TOLERANCE = 100;
+const OCR_MAX_CONCURRENT = parsePositiveInteger(process.env.OCR_MAX_CONCURRENT, 1);
+const OCR_RATE_LIMIT_PER_MINUTE = parsePositiveInteger(process.env.OCR_RATE_LIMIT_PER_MINUTE, 3);
+const OCR_RATE_LIMIT_PER_DAY = parsePositiveInteger(process.env.OCR_RATE_LIMIT_PER_DAY, 20);
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 // Supabase 配置
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -32,6 +36,7 @@ if (SUPABASE_URL && SUPABASE_KEY) {
 }
 
 // 静态文件只暴露前端目录，避免 data/config/logs 等文件被直接访问
+app.set('trust proxy', 1);
 app.use(express.static(__dirname, { index: false }));
 app.use(express.json({ limit: '64kb' }));
 
@@ -119,6 +124,13 @@ const CACHE_TTL = 1000; // 缓存1秒
 let lastCleanupDate = null;
 let cleanupPromise = null;
 let cleanupTimer = null;
+let activeOcrJobs = 0;
+const ocrRateLimits = new Map();
+
+function parsePositiveInteger(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -134,6 +146,73 @@ function getMsUntilNextMidnight() {
 function isAllowedImageSize(width, height) {
     return Math.abs(width - TARGET_IMAGE_WIDTH) <= IMAGE_TOLERANCE
         && Math.abs(height - TARGET_IMAGE_HEIGHT) <= IMAGE_TOLERANCE;
+}
+
+function getClientIp(req) {
+    const forwarded = req.headers['x-forwarded-for'];
+    const rawIp = Array.isArray(forwarded) ? forwarded[0] : forwarded || req.ip || req.socket.remoteAddress || 'unknown';
+    return String(rawIp).split(',')[0].trim() || 'unknown';
+}
+
+function pruneOcrRateLimits(now, today) {
+    for (const [ip, item] of ocrRateLimits.entries()) {
+        if (item.date !== today && now - item.minuteStart > RATE_LIMIT_WINDOW_MS) {
+            ocrRateLimits.delete(ip);
+        }
+    }
+}
+
+function limitOcrRequests(req, res, next) {
+    const now = Date.now();
+    const today = getToday();
+    const ip = getClientIp(req);
+    const current = ocrRateLimits.get(ip) || {
+        date: today,
+        dayCount: 0,
+        minuteStart: now,
+        minuteCount: 0
+    };
+
+    if (current.date !== today) {
+        current.date = today;
+        current.dayCount = 0;
+    }
+
+    if (now - current.minuteStart >= RATE_LIMIT_WINDOW_MS) {
+        current.minuteStart = now;
+        current.minuteCount = 0;
+    }
+
+    if (current.minuteCount >= OCR_RATE_LIMIT_PER_MINUTE) {
+        return res.status(429).json({ success: false, message: '操作过于频繁，请稍后再试' });
+    }
+
+    if (current.dayCount >= OCR_RATE_LIMIT_PER_DAY) {
+        return res.status(429).json({ success: false, message: '今日识别次数已达上限，请明天再试' });
+    }
+
+    current.minuteCount += 1;
+    current.dayCount += 1;
+    ocrRateLimits.set(ip, current);
+
+    if (ocrRateLimits.size > 1000) {
+        pruneOcrRateLimits(now, today);
+    }
+
+    next();
+}
+
+function acquireOcrSlot() {
+    if (activeOcrJobs >= OCR_MAX_CONCURRENT) {
+        return false;
+    }
+
+    activeOcrJobs += 1;
+    return true;
+}
+
+function releaseOcrSlot() {
+    activeOcrJobs = Math.max(0, activeOcrJobs - 1);
 }
 
 function isInviteCode(code) {
@@ -318,6 +397,89 @@ async function loadData() {
     }
 }
 
+function buildDashboardData(allCodes) {
+    const unused = allCodes.filter(item => !item.used);
+    const used = allCodes.filter(item => item.used);
+    const counts = {
+        unused: unused.length,
+        used: used.length,
+        total: allCodes.length
+    };
+
+    // 未使用：取最新的2条 + 最旧的3条
+    const sortedByTime = [...unused].sort((a, b) => b.timestamp - a.timestamp);
+    const newest = sortedByTime.slice(0, 2);
+    const newestIds = new Set(newest.map(item => item.id));
+    const oldest = sortedByTime
+        .slice()
+        .reverse()
+        .filter(item => !newestIds.has(item.id))
+        .slice(0, 3);
+
+    const sortedUsed = [...used].sort((a, b) => (b.usedAt || 0) - (a.usedAt || 0));
+
+    return {
+        unused: [...newest, ...oldest],
+        used: sortedUsed.slice(0, 5),
+        counts
+    };
+}
+
+function throwIfSupabaseError(result, label) {
+    if (result.error) {
+        throw new Error(`${label}: ${result.error.message}`);
+    }
+}
+
+async function loadDashboardData() {
+    await ensureDailyCleanup();
+
+    if (!supabase) {
+        return buildDashboardData(await loadData());
+    }
+
+    const today = getToday();
+    const fields = 'id, code, date, used, used_at, created_at';
+    const [
+        unusedCountResult,
+        usedCountResult,
+        newestUnusedResult,
+        oldestUnusedResult,
+        usedResult
+    ] = await Promise.all([
+        supabase.from('invite_codes').select('id', { count: 'exact', head: true }).eq('date', today).eq('used', false),
+        supabase.from('invite_codes').select('id', { count: 'exact', head: true }).eq('date', today).eq('used', true),
+        supabase.from('invite_codes').select(fields).eq('date', today).eq('used', false).order('created_at', { ascending: false }).limit(2),
+        supabase.from('invite_codes').select(fields).eq('date', today).eq('used', false).order('created_at', { ascending: true }).limit(5),
+        supabase.from('invite_codes').select(fields).eq('date', today).eq('used', true).order('used_at', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).limit(5)
+    ]);
+
+    throwIfSupabaseError(unusedCountResult, 'Supabase 查询可用数量失败');
+    throwIfSupabaseError(usedCountResult, 'Supabase 查询已用数量失败');
+    throwIfSupabaseError(newestUnusedResult, 'Supabase 查询最新可用邀请码失败');
+    throwIfSupabaseError(oldestUnusedResult, 'Supabase 查询最旧可用邀请码失败');
+    throwIfSupabaseError(usedResult, 'Supabase 查询已用邀请码失败');
+
+    const newestUnused = dedupeCodeRecords(newestUnusedResult.data.map(mapDbRecord));
+    const newestIds = new Set(newestUnused.map(item => item.id));
+    const oldestUnused = dedupeCodeRecords(oldestUnusedResult.data.map(mapDbRecord))
+        .filter(item => !newestIds.has(item.id))
+        .slice(0, 3);
+    const recentUsed = dedupeCodeRecords(usedResult.data.map(mapDbRecord));
+    const unusedCount = unusedCountResult.count || 0;
+    const usedCount = usedCountResult.count || 0;
+
+    return {
+        unused: [...newestUnused, ...oldestUnused],
+        used: recentUsed,
+        counts: {
+            unused: unusedCount,
+            used: usedCount,
+            total: unusedCount + usedCount
+        }
+    };
+}
+
 // 清除缓存（数据变更时调用）
 function invalidateCache() {
     dataCache = null;
@@ -485,6 +647,16 @@ async function addCodeRecord(code) {
     return newRecord;
 }
 
+app.get('/healthz', (req, res) => {
+    res.json({
+        status: 'ok',
+        ready: Boolean(workerPool && chineseWorkerPool),
+        storage: supabase ? 'supabase' : 'local',
+        activeOcrJobs,
+        ocrMaxConcurrent: OCR_MAX_CONCURRENT
+    });
+});
+
 // 首页
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
@@ -493,36 +665,12 @@ app.get('/', (req, res) => {
 // 获取列表（返回5个未使用和5个已使用的邀请码）
 app.get('/api', async (req, res) => {
     if (req.query.action === 'get') {
-        const allCodes = await loadData();
-        const today = getToday();
-        
-        // 分离未使用和已使用
-        const unused = allCodes.filter(item => !item.used);
-        const used = allCodes.filter(item => item.used);
-        const counts = {
-            unused: unused.length,
-            used: used.length,
-            total: allCodes.length
-        };
-        
-        // 未使用：取最新的2条 + 最旧的3条（避免重复）
-        const sortedByTime = [...unused].sort((a, b) => b.timestamp - a.timestamp);
-        const newest = sortedByTime.slice(0, 2);
-        // 从剩余的（排除最新的2条）取最后3条
-        const remaining = sortedByTime.slice(2);
-        const oldest = remaining.slice(-3);
-        const resultUnused = [...newest, ...oldest];
-
-        // 已使用：按使用时间倒序，取最近的5个
-        const sortedUsed = [...used].sort((a, b) => {
-            // usedAt 可能为空，空值排到后面
-            const timeA = a.usedAt || 0;
-            const timeB = b.usedAt || 0;
-            return timeB - timeA;
-        });
-        const resultUsed = sortedUsed.slice(0, 5);
-        
-        res.json({ unused: resultUnused, used: resultUsed, counts });
+        try {
+            res.json(await loadDashboardData());
+        } catch (error) {
+            console.error('获取邀请码列表失败:', error.message || error);
+            res.status(500).json({ success: false, message: '获取邀请码列表失败' });
+        }
     } else {
         res.json({ success: false, message: '未知操作' });
     }
@@ -533,29 +681,26 @@ app.post('/api/mark_used', async (req, res) => {
     const itemNumber = req.body.number;
     const itemId = req.body.id;
     const today = getToday();
-    
-    // 读取所有数据
-    let allCodes = await loadData();
-    const target = allCodes.find(item => {
-        if (item.date !== today || item.used) {
-            return false;
-        }
-
-        return (itemNumber && item.number === itemNumber) || (itemId !== undefined && item.id === itemId);
-    });
 
     if (supabase) {
-        if (!target || target.id === undefined) {
+        if (!isInviteCode(itemNumber) && itemId === undefined) {
             return res.json({ success: false, message: '未找到该邀请码或已使用' });
         }
 
-        const { data, error } = await supabase
+        let query = supabase
             .from('invite_codes')
             .update({ used: true, used_at: new Date().toISOString() })
-            .eq('id', target.id)
+            .eq('date', today)
             .eq('used', false)
-            .select('id')
-            .maybeSingle();
+            .select('id');
+
+        if (itemId !== undefined) {
+            query = query.eq('id', itemId);
+        } else {
+            query = query.eq('code', itemNumber);
+        }
+
+        const { data, error } = await query.maybeSingle();
 
         if (error) {
             return res.json({ success: false, message: error.message });
@@ -569,6 +714,8 @@ app.post('/api/mark_used', async (req, res) => {
         return res.json({ success: true });
     }
 
+    // 读取所有数据
+    let allCodes = await loadData();
     let found = false;
     
     // 查找并标记
@@ -592,8 +739,9 @@ app.post('/api/mark_used', async (req, res) => {
 });
 
 // OCR 识别并自动保存
-app.post('/api/ocr', handleImageUpload, async (req, res) => {
+app.post('/api/ocr', limitOcrRequests, handleImageUpload, async (req, res) => {
     const startTime = Date.now();
+    let ocrSlotAcquired = false;
     
     try {
         if (!req.file) {
@@ -604,6 +752,11 @@ app.post('/api/ocr', handleImageUpload, async (req, res) => {
         if (!workerPool || !chineseWorkerPool) {
             return res.json({ success: false, message: '系统正在初始化，请稍后再试' });
         }
+
+        if (!acquireOcrSlot()) {
+            return res.status(429).json({ success: false, message: '系统正在识别其他图片，请稍后再试' });
+        }
+        ocrSlotAcquired = true;
 
         // 获取图片尺寸
         const image = sharp(req.file.buffer);
@@ -690,6 +843,10 @@ app.post('/api/ocr', handleImageUpload, async (req, res) => {
     } catch (err) {
         console.error('OCR 错误:', err);
         res.json({ success: false, message: err.message });
+    } finally {
+        if (ocrSlotAcquired) {
+            releaseOcrSlot();
+        }
     }
 });
 

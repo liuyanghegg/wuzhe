@@ -1,11 +1,18 @@
 services:
   - type: web
-    name: invite-code-helper
-    env: node
-    buildCommand: npm ci
-    startCommand: npm start
+    name: pdd
+    env: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
     envVars:
-      - key: NODE_VERSION
-        value: 18
       - key: TZ
         value: Asia/Shanghai
+      - key: OCR_MAX_CONCURRENT
+        value: "1"
+      - key: OCR_RATE_LIMIT_PER_MINUTE
+        value: "3"
+      - key: OCR_RATE_LIMIT_PER_DAY
+        value: "20"

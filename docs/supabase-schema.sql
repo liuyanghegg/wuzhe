@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS invite_codes (
 CREATE INDEX IF NOT EXISTS idx_invite_codes_date ON invite_codes(date);
 CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code);
 CREATE INDEX IF NOT EXISTS idx_invite_codes_used ON invite_codes(used);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_date_used_created ON invite_codes(date, used, created_at);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_date_used_used_at ON invite_codes(date, used, used_at DESC);
 
 -- 清理历史重复数据：同一天同一个邀请码只保留一条
 -- 若其中一条已使用，优先保留已使用记录，避免重复上传后重新出现在可用列表
@@ -29,11 +31,25 @@ WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_date_code_unique ON invite_codes(date, code);
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'invite_codes_code_format'
+    ) THEN
+        ALTER TABLE invite_codes
+            ADD CONSTRAINT invite_codes_code_format
+            CHECK (code ~ '^[789][0-9]{8}$') NOT VALID;
+    END IF;
+END $$;
+
+ALTER TABLE invite_codes VALIDATE CONSTRAINT invite_codes_code_format;
+
 -- 启用 Row Level Security (RLS)
 ALTER TABLE invite_codes ENABLE ROW LEVEL SECURITY;
 
--- 创建允许所有操作的策略（开发环境）
-CREATE POLICY "Allow all operations" ON invite_codes
-    FOR ALL
-    USING (true)
-    WITH CHECK (true);
+-- 生产环境不开放匿名/登录用户直连表；后端必须使用 Supabase service_role key。
+DROP POLICY IF EXISTS "Allow all operations" ON invite_codes;
+REVOKE ALL ON TABLE invite_codes FROM anon, authenticated;
+REVOKE ALL ON SEQUENCE invite_codes_id_seq FROM anon, authenticated;
