@@ -2,7 +2,7 @@ services:
   - type: web
     name: invite-code-helper
     env: node
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
     envVars:
       - key: NODE_VERSION

@@ -13,6 +13,22 @@ CREATE INDEX IF NOT EXISTS idx_invite_codes_date ON invite_codes(date);
 CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code);
 CREATE INDEX IF NOT EXISTS idx_invite_codes_used ON invite_codes(used);
 
+-- 清理历史重复数据：同一天同一个邀请码只保留一条
+-- 若其中一条已使用，优先保留已使用记录，避免重复上传后重新出现在可用列表
+WITH ranked AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER (
+            PARTITION BY date, code
+            ORDER BY used DESC, used_at DESC NULLS LAST, created_at ASC, id ASC
+        ) AS rn
+    FROM invite_codes
+)
+DELETE FROM invite_codes
+WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_date_code_unique ON invite_codes(date, code);
+
 -- 启用 Row Level Security (RLS)
 ALTER TABLE invite_codes ENABLE ROW LEVEL SECURITY;
 

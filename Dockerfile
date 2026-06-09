@@ -4,11 +4,12 @@ WORKDIR /app
 
 # 安装依赖
 COPY package.json package-lock.json ./
-RUN npm install --production
+RUN npm ci --omit=dev
 
 # 复制必要文件
 COPY src/ ./src/
 COPY eng.traineddata ./
+COPY chi_sim.traineddata ./
 
 # 环境变量
 ENV PORT=8080

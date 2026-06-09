@@ -1,11 +1,13 @@
-require('dotenv').config({ path: __dirname + '/../config/.env' });
+const path = require('path');
+const dotenv = require('dotenv');
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
+dotenv.config({ path: path.join(__dirname, '..', 'config', '.env'), override: true });
 
 const express = require('express');
 const multer = require('multer');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
 const fs = require('fs');
-const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -29,9 +31,9 @@ if (SUPABASE_URL && SUPABASE_KEY) {
     console.log('⚠️ 未配置 Supabase，使用本地文件存储');
 }
 
-// 静态文件
-app.use(express.static('.'));
-app.use(express.json());
+// 静态文件只暴露前端目录，避免 data/config/logs 等文件被直接访问
+app.use(express.static(__dirname, { index: false }));
+app.use(express.json({ limit: '64kb' }));
 
 // 创建 Tesseract Worker 池，复用语言包
 let workerPool = null;
@@ -76,7 +78,30 @@ async function initWorkerPool() {
 }
 
 // 文件上传（使用内存存储，不保存到磁盘）
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 8 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype && file.mimetype.startsWith('image/')) {
+            cb(null, true);
+            return;
+        }
+
+        cb(new Error('只支持上传图片文件'));
+    }
+});
+
+function handleImageUpload(req, res, next) {
+    upload.single('image')(req, res, err => {
+        if (!err) {
+            next();
+            return;
+        }
+
+        const message = err.code === 'LIMIT_FILE_SIZE' ? '图片不能超过 8MB' : err.message;
+        res.json({ success: false, message });
+    });
+}
 
 // 获取今天日期
 function getToday() {
@@ -109,6 +134,57 @@ function getMsUntilNextMidnight() {
 function isAllowedImageSize(width, height) {
     return Math.abs(width - TARGET_IMAGE_WIDTH) <= IMAGE_TOLERANCE
         && Math.abs(height - TARGET_IMAGE_HEIGHT) <= IMAGE_TOLERANCE;
+}
+
+function isInviteCode(code) {
+    return /^[789]\d{8}$/.test(String(code || ''));
+}
+
+function normalizeCodeRecord(item) {
+    return {
+        id: item.id,
+        number: item.number || item.code,
+        timestamp: item.timestamp || (item.created_at ? new Date(item.created_at).getTime() : Date.now()),
+        date: item.date,
+        used: Boolean(item.used),
+        usedAt: item.usedAt || (item.used_at ? new Date(item.used_at).getTime() : undefined)
+    };
+}
+
+function pickCanonicalRecord(current, candidate) {
+    if (!current) {
+        return candidate;
+    }
+
+    // 只要同日同码曾被标记已用，就不再回到可用列表。
+    if (candidate.used !== current.used) {
+        return candidate.used ? candidate : current;
+    }
+
+    if (candidate.used) {
+        return (candidate.usedAt || 0) > (current.usedAt || 0) ? candidate : current;
+    }
+
+    return (candidate.timestamp || 0) < (current.timestamp || 0) ? candidate : current;
+}
+
+function dedupeCodeRecords(records) {
+    const byCode = new Map();
+
+    for (const raw of records) {
+        const item = normalizeCodeRecord(raw);
+        if (!isInviteCode(item.number)) {
+            continue;
+        }
+
+        byCode.set(item.number, pickCanonicalRecord(byCode.get(item.number), item));
+    }
+
+    return Array.from(byCode.values());
+}
+
+function mapDbRecord(item) {
+    return normalizeCodeRecord(item);
 }
 
 async function cleanupExpiredCodes() {
@@ -219,15 +295,8 @@ async function loadData() {
             page++;
         }
         
-        // 转换数据格式
-        const todayData = allData.map(item => ({
-            id: item.id,
-            number: item.code,
-            timestamp: new Date(item.created_at).getTime(),
-            date: item.date,
-            used: item.used,
-            usedAt: item.used_at ? new Date(item.used_at).getTime() : undefined
-        }));
+        // 转换数据格式，并按邀请码去重
+        const todayData = dedupeCodeRecords(allData.map(mapDbRecord));
         
         dataCache = todayData;
         dataCacheTime = now;
@@ -237,8 +306,8 @@ async function loadData() {
         // 本地文件存储
         if (fs.existsSync(DATA_FILE)) {
             const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-            // 只保留今天的数据
-            const todayData = data.filter(item => item.date === today);
+            // 只保留今天的数据，并按邀请码去重
+            const todayData = dedupeCodeRecords(data.filter(item => item.date === today));
             dataCache = todayData;
             dataCacheTime = now;
             return todayData;
@@ -283,7 +352,7 @@ async function saveData(data) {
     await ensureDailyCleanup();
 
     const today = getToday();
-    data = data.filter(item => item.date === today);
+    data = dedupeCodeRecords(data.filter(item => item.date === today));
     
     if (supabase) {
         // 清除今天的数据，然后重新插入
@@ -323,8 +392,42 @@ async function saveData(data) {
     invalidateCache();
 }
 
+async function findExistingCodeRecord(code) {
+    if (!isInviteCode(code)) {
+        return null;
+    }
+
+    const today = getToday();
+
+    if (supabase) {
+        const { data, error } = await supabase
+            .from('invite_codes')
+            .select('id, code, date, used, used_at, created_at')
+            .eq('date', today)
+            .eq('code', code)
+            .order('used', { ascending: false })
+            .order('used_at', { ascending: false, nullsFirst: false })
+            .order('created_at', { ascending: true })
+            .limit(1);
+
+        if (error) {
+            throw new Error(`Supabase 查询邀请码失败: ${error.message}`);
+        }
+
+        return data && data.length > 0 ? mapDbRecord(data[0]) : null;
+    }
+
+    const allCodes = await loadData();
+    return allCodes.find(item => item.number === code) || null;
+}
+
 async function addCodeRecord(code) {
     await ensureDailyCleanup();
+
+    const existing = await findExistingCodeRecord(code);
+    if (existing) {
+        return { ...existing, duplicate: true };
+    }
 
     const now = Date.now();
     const record = {
@@ -348,6 +451,13 @@ async function addCodeRecord(code) {
             .single();
 
         if (error) {
+            if (error.code === '23505') {
+                const duplicate = await findExistingCodeRecord(code);
+                if (duplicate) {
+                    return { ...duplicate, duplicate: true };
+                }
+            }
+
             throw new Error(`Supabase 上传同步失败: ${error.message}`);
         }
 
@@ -426,6 +536,39 @@ app.post('/api/mark_used', async (req, res) => {
     
     // 读取所有数据
     let allCodes = await loadData();
+    const target = allCodes.find(item => {
+        if (item.date !== today || item.used) {
+            return false;
+        }
+
+        return (itemNumber && item.number === itemNumber) || (itemId !== undefined && item.id === itemId);
+    });
+
+    if (supabase) {
+        if (!target || target.id === undefined) {
+            return res.json({ success: false, message: '未找到该邀请码或已使用' });
+        }
+
+        const { data, error } = await supabase
+            .from('invite_codes')
+            .update({ used: true, used_at: new Date().toISOString() })
+            .eq('id', target.id)
+            .eq('used', false)
+            .select('id')
+            .maybeSingle();
+
+        if (error) {
+            return res.json({ success: false, message: error.message });
+        }
+
+        if (!data) {
+            return res.json({ success: false, message: '未找到该邀请码或已使用' });
+        }
+
+        invalidateCache();
+        return res.json({ success: true });
+    }
+
     let found = false;
     
     // 查找并标记
@@ -449,7 +592,7 @@ app.post('/api/mark_used', async (req, res) => {
 });
 
 // OCR 识别并自动保存
-app.post('/api/ocr', upload.single('image'), async (req, res) => {
+app.post('/api/ocr', handleImageUpload, async (req, res) => {
     const startTime = Date.now();
     
     try {
@@ -514,10 +657,12 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         
         // 找出以7、8、9开头的9位数字
         const codes = [];
+        const seenCodes = new Set();
         if (allDigits.length >= 9) {
             for (let i = 0; i <= allDigits.length - 9; i++) {
                 const candidate = allDigits.substring(i, i + 9);
-                if (/^[789]/.test(candidate)) {
+                if (isInviteCode(candidate) && !seenCodes.has(candidate)) {
+                    seenCodes.add(candidate);
                     codes.push(candidate);
                 }
             }
@@ -526,55 +671,12 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
         // 只有识别到以7、8、9开头的9位数字才保存
         if (codes.length > 0) {
             const code = codes[0];
-            const today = getToday();
-            
-            if (supabase) {
-                // 检查是否已存在
-                const { data: existing } = await supabase
-                    .from('invite_codes')
-                    .select('*')
-                    .eq('date', today)
-                    .eq('code', code)
-                    .single();
-                
-                if (existing) {
-                    // 如果已存在且已使用，重置为未使用
-                    if (existing.used) {
-                        const { error } = await supabase
-                            .from('invite_codes')
-                            .update({ used: false, used_at: null })
-                            .eq('id', existing.id);
-                        
-                        if (!error) {
-                            console.log(`✅ OCR 检测到重复已使用邀请码，已重置为未使用: ${code}`);
-                            invalidateCache();
-                        }
-                    } else {
-                        console.log(`ℹ️ OCR 检测到重复未使用邀请码，跳过: ${code}`);
-                    }
-                } else {
-                    // 不存在，新增记录
-                    await addCodeRecord(code);
-                    console.log(`✅ OCR 上传后已同步到数据库: ${code}`);
-                }
+
+            const saved = await addCodeRecord(code);
+            if (saved.duplicate) {
+                console.log(`ℹ️ OCR 检测到重复邀请码，跳过: ${code}`);
             } else {
-                // 本地文件存储模式
-                const allCodes = await loadData();
-                const existing = allCodes.find(item => item.number === code);
-                
-                if (existing) {
-                    if (existing.used) {
-                        existing.used = false;
-                        existing.usedAt = undefined;
-                        await saveData(allCodes);
-                        console.log(`✅ OCR 检测到重复已使用邀请码，已重置为未使用: ${code}`);
-                    } else {
-                        console.log(`ℹ️ OCR 检测到重复未使用邀请码，跳过: ${code}`);
-                    }
-                } else {
-                    await addCodeRecord(code);
-                    console.log(`✅ OCR 上传后已同步到数据库: ${code}`);
-                }
+                console.log(`✅ OCR 上传后已同步到数据库: ${code}`);
             }
         }
         
