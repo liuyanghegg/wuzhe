@@ -821,7 +821,7 @@ app.post('/api/ocr', limitOcrRequests, handleImageUpload, async (req, res) => {
             }
         }
         
-        // 只有识别到以7、8、9开头的9位数字才保存
+        // 只有识别到8位连续数字才保存
         if (codes.length > 0) {
             const code = codes[0];
 
