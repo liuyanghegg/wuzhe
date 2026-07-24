@@ -216,7 +216,7 @@ function releaseOcrSlot() {
 }
 
 function isInviteCode(code) {
-    return /^[789]\d{8}$/.test(String(code || ''));
+    return /^\d{8}$/.test(String(code || ''));
 }
 
 function normalizeCodeRecord(item) {
@@ -808,12 +808,12 @@ app.post('/api/ocr', limitOcrRequests, handleImageUpload, async (req, res) => {
         // 提取数字：去空格后提取所有数字
         const allDigits = text.replace(/\s/g, '').replace(/\D/g, '');
         
-        // 找出以7、8、9开头的9位数字
+        // 找出连续8位数字
         const codes = [];
         const seenCodes = new Set();
-        if (allDigits.length >= 9) {
-            for (let i = 0; i <= allDigits.length - 9; i++) {
-                const candidate = allDigits.substring(i, i + 9);
+        if (allDigits.length >= 8) {
+            for (let i = 0; i <= allDigits.length - 8; i++) {
+                const candidate = allDigits.substring(i, i + 8);
                 if (isInviteCode(candidate) && !seenCodes.has(candidate)) {
                     seenCodes.add(candidate);
                     codes.push(candidate);
